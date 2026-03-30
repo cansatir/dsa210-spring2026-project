@@ -11,7 +11,7 @@ Usage:  python scripts/build_notebook.py <stage>
 import json, sys
 from pathlib import Path
 
-stage = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+stage = int(sys.argv[1]) if len(sys.argv) > 1 else 9
 
 def md(cell_id, source):
     return {"cell_type": "markdown", "id": cell_id, "metadata": {}, "source": source}
@@ -426,8 +426,222 @@ with open(out_path, 'w') as f:
 print(f'Section 5 complete — results saved to {out_path}')"""),
 ]
 
+# ── Section 6: Feature Engineering ───────────────────────────────────────────
+S6 = [
+    md("md-s6", "## 6. Feature Engineering for ML"),
+    code("code-s6-load",
+"""# ── Load enriched data ────────────────────────────────────────
+from collections import Counter
+
+df = pd.read_parquet(DATA_PROCESSED / 'jobs_enriched.parquet')
+df['skills_list'] = df['skills_list'].apply(lambda x: list(x) if hasattr(x, '__iter__') and not isinstance(x, str) else [])
+print(f'Loaded {len(df):,} rows for feature engineering')"""),
+
+    code("code-s6-skills",
+"""# ── Binary skill features (top 20) ───────────────────────────
+all_skills = [s for row in df['skills_list'] for s in row]
+TOP_SKILLS = [s for s, _ in Counter(all_skills).most_common(20)]
+for skill in TOP_SKILLS:
+    df[f'skill_{skill}'] = df['skills_list'].apply(lambda x, sk=skill: int(sk in x))
+print('Top 20 skills:', TOP_SKILLS)"""),
+
+    code("code-s6-encode",
+"""# ── One-hot and binary encode ─────────────────────────────────
+top_countries = df['job_country'].value_counts().head(20).index.tolist()
+df['job_country_grp'] = (df['job_country']
+                         .where(df['job_country'].isin(top_countries), 'Other')
+                         .fillna('Other'))
+
+for c in ['job_title_short', 'job_country_grp', 'seniority']:
+    df[c] = df[c].fillna('Unknown')
+
+df_ohe = pd.get_dummies(df[['job_title_short', 'job_country_grp', 'seniority']], dtype=int)
+df_ohe['job_work_from_home']    = df['job_work_from_home'].fillna(False).astype(int)
+df_ohe['job_no_degree_mention'] = df['job_no_degree_mention'].fillna(False).astype(int)
+
+skill_cols = [f'skill_{s}' for s in TOP_SKILLS]
+for _s in TOP_SKILLS:
+    df_ohe[f'skill_{_s}'] = df[f'skill_{_s}'].values
+df_ohe['salary_year_avg'] = df['salary_year_avg'].values
+
+n_before = len(df_ohe)
+df_ohe = df_ohe.dropna(subset=['salary_year_avg']).reset_index(drop=True)
+print(f'Dropped {n_before - len(df_ohe):,} rows with null salary')
+print(f'Feature matrix: {df_ohe.shape}')"""),
+
+    code("code-s6-split",
+"""# ── Train/test split and save ─────────────────────────────────
+from sklearn.model_selection import train_test_split
+
+X_all = df_ohe.drop(columns=['salary_year_avg'])
+y_all = df_ohe['salary_year_avg']
+X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+print(f'Train: {X_train.shape}  |  Test: {X_test.shape}')
+
+df_ohe.to_parquet(DATA_PROCESSED / 'features.parquet', index=False)
+print(f'Section 6 complete — features.parquet saved ({X_all.shape[1]} features)')"""),
+]
+
+# ── Section 7: Salary Prediction Models ──────────────────────────────────────
+S7 = [
+    md("md-s7", "## 7. Salary Prediction Models"),
+    code("code-s7-setup",
+"""# ── Load features ─────────────────────────────────────────────
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from xgboost import XGBRegressor
+
+df_feat = pd.read_parquet(DATA_PROCESSED / 'features.parquet')
+X_all   = df_feat.drop(columns=['salary_year_avg'])
+y_all   = df_feat['salary_year_avg']
+X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+print(f'Train: {X_train.shape}  |  Test: {X_test.shape}')"""),
+
+    code("code-s7-train",
+"""# ── Train and evaluate three models ──────────────────────────
+models_def = {
+    'Linear Regression': LinearRegression(),
+    'Random Forest':     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
+    'XGBoost':           XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1),
+}
+trained_models = {}
+preds_store    = {}
+results        = {}
+
+for name, mdl in models_def.items():
+    mdl.fit(X_train, y_train)
+    y_pred = mdl.predict(X_test)
+    trained_models[name] = mdl
+    preds_store[name]    = y_pred
+    rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+    mae  = float(mean_absolute_error(y_test, y_pred))
+    r2   = float(r2_score(y_test, y_pred))
+    results[name] = {'RMSE': rmse, 'MAE': mae, 'R2': r2}
+    print(f'{name:25s}  RMSE={rmse:,.0f}  MAE={mae:,.0f}  R2={r2:.4f}')
+
+df_results = pd.DataFrame(results).T.rename_axis('Model').reset_index()
+df_results.to_csv(RESULTS / 'model_comparison.csv', index=False)
+print('Saved model_comparison.csv')"""),
+
+    code("code-s7-fig8",
+"""# ── fig8 — Predicted vs actual (best model) ──────────────────
+best_name   = df_results.sort_values('R2', ascending=False).iloc[0]['Model']
+y_pred_best = preds_store[best_name]
+
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.scatter(y_test, y_pred_best, alpha=0.3, s=8)
+lo, hi = float(y_test.min()), float(y_test.max())
+ax.plot([lo, hi], [lo, hi], 'r--', linewidth=1.5, label='Perfect prediction')
+ax.set_xlabel('Actual Salary (USD)')
+ax.set_ylabel('Predicted Salary (USD)')
+ax.set_title(f'Predicted vs Actual — {best_name}')
+ax.legend()
+plt.tight_layout()
+plt.savefig(FIGURES / 'fig8_pred_vs_actual.png', dpi=120)
+plt.show()
+print(f'Section 7 complete — best model: {best_name}')"""),
+]
+
+# ── Section 8: Feature Importance & SHAP ─────────────────────────────────────
+S8 = [
+    md("md-s8", "## 8. Feature Importance & SHAP Analysis"),
+    code("code-s8-setup",
+"""# ── Retrain RF and XGBoost for analysis ──────────────────────
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+import shap
+
+df_feat    = pd.read_parquet(DATA_PROCESSED / 'features.parquet')
+X_all      = df_feat.drop(columns=['salary_year_avg'])
+y_all      = df_feat['salary_year_avg']
+X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+FEAT_NAMES = list(X_all.columns)
+
+rf_fi  = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+xgb_fi = XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+rf_fi.fit(X_train, y_train)
+xgb_fi.fit(X_train, y_train)
+print('Models trained')"""),
+
+    code("code-s8-fig9",
+"""# ── fig9 — Feature importance bar charts ─────────────────────
+fi_rf  = pd.Series(rf_fi.feature_importances_,  index=FEAT_NAMES).nlargest(20).sort_values()
+fi_xgb = pd.Series(xgb_fi.feature_importances_, index=FEAT_NAMES).nlargest(20).sort_values()
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+fi_rf.plot( kind='barh', ax=axes[0], title='Random Forest — Top 20 Features')
+fi_xgb.plot(kind='barh', ax=axes[1], title='XGBoost — Top 20 Features')
+for ax in axes:
+    ax.set_xlabel('Importance')
+plt.tight_layout()
+plt.savefig(FIGURES / 'fig9_feature_importance.png', dpi=120)
+plt.show()
+
+fi_df = pd.DataFrame({'feature':        FEAT_NAMES,
+                      'rf_importance':  rf_fi.feature_importances_,
+                      'xgb_importance': xgb_fi.feature_importances_}
+                    ).sort_values('rf_importance', ascending=False)
+fi_df.to_csv(RESULTS / 'feature_importance.csv', index=False)
+print('Saved feature_importance.csv')"""),
+
+    code("code-s8-fig10",
+"""# ── fig10 — SHAP summary plot ─────────────────────────────────
+shap_sample = X_test.iloc[:500].reset_index(drop=True)
+explainer   = shap.TreeExplainer(xgb_fi)
+shap_values = explainer.shap_values(shap_sample)
+
+shap.summary_plot(shap_values, shap_sample, show=False)
+plt.savefig(FIGURES / 'fig10_shap_summary.png', dpi=120, bbox_inches='tight')
+plt.close()
+print('Section 8 complete — fig9, fig10, feature_importance.csv saved')"""),
+]
+
+# ── Section 9: Seniority Classification ──────────────────────────────────────
+S9 = [
+    md("md-s9", "## 9. Seniority Classification"),
+    code("code-s9-setup",
+"""# ── Build classification dataset ─────────────────────────────
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, ConfusionMatrixDisplay
+
+df_feat  = pd.read_parquet(DATA_PROCESSED / 'features.parquet')
+sen_cols = [c for c in df_feat.columns if c.startswith('seniority_')]
+y_clf    = df_feat[sen_cols].idxmax(axis=1).str.replace('seniority_', '', regex=False)
+X_clf    = df_feat.drop(columns=['salary_year_avg'] + sen_cols)
+
+X_tr, X_te, y_tr, y_te = train_test_split(X_clf, y_clf, test_size=0.2,
+                                            random_state=42, stratify=y_clf)
+print(f'Train: {X_tr.shape}  |  Test: {X_te.shape}')
+print('Class distribution:')
+print(y_clf.value_counts())"""),
+
+    code("code-s9-train",
+"""# ── Train RF classifier and evaluate ─────────────────────────
+clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+clf.fit(X_tr, y_tr)
+y_pred_clf = clf.predict(X_te)
+
+acc = accuracy_score(y_te, y_pred_clf)
+print(f'Accuracy: {acc:.4f}')
+print(classification_report(y_te, y_pred_clf))"""),
+
+    code("code-s9-fig11",
+"""# ── fig11 — Confusion matrix ─────────────────────────────────
+fig, ax = plt.subplots(figsize=(8, 6))
+ConfusionMatrixDisplay.from_predictions(y_te, y_pred_clf, ax=ax, colorbar=False)
+ax.set_title('Seniority Classification — Confusion Matrix')
+plt.tight_layout()
+plt.savefig(FIGURES / 'fig11_confusion_matrix.png', dpi=120)
+plt.show()
+print('Section 9 complete — fig11_confusion_matrix.png saved')"""),
+]
+
 # ── Assemble and write ─────────────────────────────────────────────────────────
-section_cells = [S1, S2, S3, S4, S5]
+section_cells = [S1, S2, S3, S4, S5, S6, S7, S8, S9]
 cells = S0[:]
 for i in range(stage):
     cells.extend(section_cells[i])
