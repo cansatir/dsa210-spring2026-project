@@ -5,4 +5,8 @@ services:
       - "8888:8888"
     volumes:
       - .:/app
+    environment:
+      # Cache HuggingFace downloads inside the repo volume so they persist
+      # across container rebuilds and are not re-downloaded every time.
+      HF_HOME: /app/data/raw/hf_cache
     restart: unless-stopped
