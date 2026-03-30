@@ -205,6 +205,10 @@ misclassifications, which is expected given the ambiguous boundary in job titles
   actually required or used on the job.
 - **BLS mapping is approximate:** OEWS occupations do not map one-to-one to the informal
   job title taxonomy used in job postings.
+- **Incomplete data toward end of collection period:** Job posting counts decline sharply
+  after August 2023 (fig6), likely due to incomplete data collection in the source dataset
+  toward the end of the collection period, rather than reflecting a real market trend.
+  Analyses involving time trends should be interpreted with caution.
 
 ### Future Work
 
