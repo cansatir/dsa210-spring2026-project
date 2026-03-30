@@ -1,0 +1,34 @@
+{
+  "H1_remote_vs_onsite": {
+    "remote_median": 127500.0,
+    "onsite_median": 115000.0,
+    "u_statistic": 33880009.0,
+    "p_value": 5.305519016916971e-40,
+    "significant": true,
+    "conclusion": "Remote jobs pay significantly more (p<0.05)."
+  },
+  "H2_python_premium": {
+    "with_python_median": 125000.0,
+    "without_python_median": 100275.0,
+    "u_statistic": 74366849.5,
+    "p_value": 0.0,
+    "significant": true,
+    "conclusion": "Python skill is linked to significantly higher salaries (p<0.05)."
+  },
+  "H3_advertised_vs_bls": {
+    "mean_salary_gap": -2086.0036178096193,
+    "t_statistic": -7.997812709774022,
+    "p_value": 1.3297751764407024e-15,
+    "significant": true,
+    "conclusion": "Advertised salaries differ significantly from BLS averages (p<0.05)."
+  },
+  "H4_seniority_levels": {
+    "junior_median": 70000.0,
+    "mid_median": 109159.0,
+    "senior_median": 140000.0,
+    "h_statistic": 2519.711962412889,
+    "p_value": 0.0,
+    "significant": true,
+    "conclusion": "Salary differs significantly across seniority levels (p<0.05)."
+  }
+}
