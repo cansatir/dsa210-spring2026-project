@@ -1,6 +1,5 @@
-data/raw/hf_cache/
-data/raw/jobs_raw.parquet
-data/raw/oews_national.xlsx
+data/raw/*
+!data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 **/.DS_Store
