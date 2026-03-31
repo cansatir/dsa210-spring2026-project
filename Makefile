@@ -1,4 +1,4 @@
-.PHONY: build start stop jupyter download local
+.PHONY: build start stop jupyter download local dashboard
 
 build:
 	docker compose up --build -d
@@ -17,3 +17,6 @@ download:
 
 local:
 	pip install -r requirements.txt && jupyter notebook notebooks/analysis.ipynb
+
+dashboard:
+	streamlit run app/dashboard.py
