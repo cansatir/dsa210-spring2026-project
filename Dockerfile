@@ -16,7 +16,7 @@ RUN mkdir -p data/raw data/processed
 COPY scripts/ scripts/
 COPY notebooks/ notebooks/
 
-EXPOSE 8888
+EXPOSE 8888 8501
 
 CMD ["jupyter", "notebook", \
      "--ip=0.0.0.0", \

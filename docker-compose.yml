@@ -3,11 +3,15 @@ services:
     build: .
     ports:
       - "8888:8888"
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  streamlit:
+    build: .
+    ports:
       - "8501:8501"
     volumes:
       - .:/app
-    environment:
-      # Cache HuggingFace downloads inside the repo volume so they persist
-      # across container rebuilds and are not re-downloaded every time.
-      HF_HOME: /app/data/raw/hf_cache
+    command: streamlit run app/dashboard.py --server.port=8501 --server.address=0.0.0.0
     restart: unless-stopped
