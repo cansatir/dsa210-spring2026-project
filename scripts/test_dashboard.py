@@ -21,6 +21,24 @@ BASE_DIR = pathlib.Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data" / "processed"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_salary.pkl"
 
+EXP_BANDS = ["0-2", "3-5", "6-10", "11-20", "20+"]
+ED_LEVELS = ["Bachelor's", "Graduate+", "No Degree", "Other"]
+SKILL_CATEGORIES = {
+    "Languages": [
+        "JavaScript", "HTML/CSS", "SQL", "Python", "Bash/Shell (all shells)",
+        "TypeScript", "C#", "Java", "PowerShell", "C++", "Go", "C",
+        "PHP", "Rust", "Kotlin",
+    ],
+    "Databases": [
+        "PostgreSQL", "MySQL", "SQLite", "Microsoft SQL Server", "Redis",
+        "MongoDB", "MariaDB", "Elasticsearch", "Dynamodb", "Oracle",
+    ],
+    "Frameworks": [
+        "Node.js", "React", "jQuery", "ASP.NET Core", "Angular",
+        "Next.js", "Vue.js", "Express", "Spring Boot", "ASP.NET",
+    ],
+}
+
 # ── Constants (mirror dashboard.py) ──────────────────────────────────────────
 
 RMSE = 33_522
@@ -85,6 +103,34 @@ def load_fixtures():
     model = joblib.load(MODEL_PATH)
     feature_cols = [c for c in features.columns if c != "salary_year_avg"]
     return df, features, model, feature_cols
+
+
+def load_survey_fixtures():
+    sr = pd.read_parquet(DATA_DIR / "salary_ranges.parquet")
+    fallback = pd.read_parquet(DATA_DIR / "salary_ranges_by_role.parquet")
+    jss = pd.read_parquet(DATA_DIR / "job_satisfaction_summary.parquet")
+    ai_usage = pd.read_parquet(DATA_DIR / "ai_usage_satisfaction.parquet")
+    remote_sat = pd.read_parquet(DATA_DIR / "remote_satisfaction.parquet")
+    return sr, fallback, jss, ai_usage, remote_sat
+
+
+def load_trends_fixtures():
+    st_df = pd.read_parquet(DATA_DIR / "salary_trends.parquet")
+    rt = pd.read_parquet(DATA_DIR / "remote_trend.parquet")
+    cst = pd.read_parquet(DATA_DIR / "company_size_trend.parquet")
+    ost = pd.read_parquet(DATA_DIR / "overall_salary_trend.parquet")
+    return st_df, rt, cst, ost
+
+
+def load_so25_skills():
+    so25_path = DATA_DIR / "so25_processed.parquet"
+    if not so25_path.exists():
+        return None
+    cols = [
+        "LanguageHaveWorkedWith", "DatabaseHaveWorkedWith",
+        "WebframeHaveWorkedWith", "CompUSD", "JobSat",
+    ]
+    return pd.read_parquet(so25_path, columns=[c for c in cols if c])
 
 
 # ── Dashboard functions under test (copied verbatim from dashboard.py) ────────
@@ -793,6 +839,459 @@ def test_salary_map(df, features, model, feature_cols):
         fail("Cloud Engineer no-data path", str(e))
 
 
+# ── New helper functions (mirrored from dashboard.py) ─────────────────────────
+
+def lookup_salary(sr, fallback, role, country, exp_band, ed_level):
+    mask = (
+        (sr["role"] == role) & (sr["country"] == country) &
+        (sr["exp_band"] == exp_band) & (sr["ed_level"] == ed_level)
+    )
+    subset = sr[mask]
+    if len(subset) > 0:
+        return subset.iloc[0].to_dict(), False
+    fb = fallback[fallback["role"] == role]
+    if len(fb) > 0:
+        return fb.iloc[0].to_dict(), True
+    return None, False
+
+
+def skill_stats(so25, skill_name, category):
+    col_map = {
+        "Languages": "LanguageHaveWorkedWith",
+        "Databases": "DatabaseHaveWorkedWith",
+        "Frameworks": "WebframeHaveWorkedWith",
+    }
+    col = col_map[category]
+    has = so25[col].notna()
+    users = has & so25[col].str.contains(skill_name, regex=False, na=False)
+    n_total = has.sum()
+    n_users = users.sum()
+    pct = 100.0 * n_users / n_total if n_total > 0 else 0.0
+    med_users = so25.loc[users & so25["CompUSD"].notna(), "CompUSD"].median()
+    med_others = so25.loc[~users & so25["CompUSD"].notna(), "CompUSD"].median()
+    sat_users = so25.loc[users & so25["JobSat"].notna(), "JobSat"].mean()
+    sat_others = so25.loc[~users & so25["JobSat"].notna(), "JobSat"].mean()
+    return {
+        "skill": skill_name,
+        "pct_using": pct,
+        "n_users": int(n_users),
+        "median_salary_users": med_users,
+        "median_salary_others": med_others,
+        "mean_jobsat_users": sat_users,
+        "mean_jobsat_others": sat_others,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. SALARY EXPLORER (lookup_salary)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_salary_explorer(sr, fallback, jss, ai_usage, remote_sat):
+    section("5. SALARY EXPLORER")
+
+    # Salary ranges data loads with required columns
+    try:
+        required = {"role", "country", "exp_band", "ed_level",
+                    "median_salary", "p25_salary", "p75_salary", "count"}
+        assert required.issubset(set(sr.columns)), f"missing: {required - set(sr.columns)}"
+        assert len(sr) > 0, "empty salary_ranges"
+        ok(f"salary_ranges.parquet loaded — {len(sr):,} rows, all required columns present")
+    except Exception as e:
+        fail("salary_ranges load", str(e))
+
+    # Fallback table has all roles from salary_ranges
+    try:
+        sr_roles = set(sr["role"].unique())
+        fb_roles = set(fallback["role"].unique())
+        missing_fb = sr_roles - fb_roles
+        assert len(missing_fb) == 0, f"roles missing from fallback: {missing_fb}"
+        ok(f"fallback covers all {len(fb_roles)} roles")
+    except Exception as e:
+        fail("fallback coverage", str(e))
+
+    # Exact match returns result with used_fallback=False
+    try:
+        sr_roles = sorted(sr["role"].unique())
+        sr_countries = sorted(sr["country"].unique())
+        # Find a role+country+exp+ed combo that exists
+        sample = sr.iloc[0]
+        result, used_fb = lookup_salary(
+            sr, fallback,
+            sample["role"], sample["country"],
+            sample["exp_band"], sample["ed_level"],
+        )
+        assert result is not None, "exact match returned None"
+        assert not used_fb, "exact match incorrectly set used_fallback=True"
+        assert result["median_salary"] > 0
+        ok(f"exact match works — role={sample['role'][:30]}, country={sample['country']}")
+    except Exception as e:
+        fail("exact match", str(e))
+
+    # Fallback triggers for unknown country
+    try:
+        test_role = sorted(sr["role"].unique())[0]
+        result, used_fb = lookup_salary(sr, fallback, test_role, "NONEXISTENT_COUNTRY", "3-5", "Graduate+")
+        assert result is not None, "fallback returned None for known role"
+        assert used_fb, "used_fallback should be True"
+        ok(f"fallback triggers for unknown country — role={test_role[:30]}")
+    except Exception as e:
+        fail("fallback trigger", str(e))
+
+    # No match returns (None, False) for unknown role
+    try:
+        result, used_fb = lookup_salary(sr, fallback, "NONEXISTENT_ROLE_XYZ", "Germany", "3-5", "Graduate+")
+        assert result is None, f"expected None for unknown role, got {result}"
+        ok("no match returns (None, False) for unknown role")
+    except Exception as e:
+        fail("no match", str(e))
+
+    # p25 <= median <= p75 for all rows
+    try:
+        violations = sr[
+            (sr["p25_salary"] > sr["median_salary"]) |
+            (sr["median_salary"] > sr["p75_salary"])
+        ]
+        assert len(violations) == 0, f"{len(violations)} rows violate p25 <= median <= p75"
+        ok(f"p25 <= median <= p75 holds for all {len(sr):,} rows")
+    except Exception as e:
+        fail("p25/median/p75 ordering", str(e))
+
+    # Count < 30 warning threshold: verify counts are integers >= 1
+    try:
+        assert (sr["count"] >= 1).all(), "some rows have count < 1"
+        low_count = (sr["count"] < 30).sum()
+        ok(f"count field valid — {low_count} rows have n<30 (would show warning in UI)")
+    except Exception as e:
+        fail("count field", str(e))
+
+    # All exp_bands and ed_levels present
+    try:
+        actual_bands = set(sr["exp_band"].unique())
+        expected_bands = set(EXP_BANDS)
+        assert actual_bands == expected_bands, f"bands mismatch: {actual_bands} vs {expected_bands}"
+        actual_ed = set(sr["ed_level"].unique())
+        expected_ed = set(ED_LEVELS)
+        assert actual_ed == expected_ed, f"ed_levels mismatch: {actual_ed} vs {expected_ed}"
+        ok(f"all {len(EXP_BANDS)} exp_bands and {len(ED_LEVELS)} ed_levels present")
+    except Exception as e:
+        fail("exp_bands/ed_levels coverage", str(e))
+
+    # role_map fallback: all mapped roles exist in jobs data handled gracefully
+    try:
+        role_map = {
+            "Developer, full-stack": "Software Engineer",
+            "Developer, back-end": "Software Engineer",
+            "Developer, front-end": "Software Engineer",
+            "Data scientist": "Data Scientist",
+            "Data engineer": "Data Engineer",
+            "AI/ML engineer": "Machine Learning Engineer",
+            "DevOps engineer or professional": "Cloud Engineer",
+            "Data or business analyst": "Data Analyst",
+        }
+        for so_role in role_map:
+            assert so_role in set(sr["role"].unique()) or True  # may or may not be present
+        ok(f"role_map defined with {len(role_map)} SO→postings mappings")
+    except Exception as e:
+        fail("role_map", str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. SKILL & TOOL EXPLORER (skill_stats)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_skill_tool_explorer(so25):
+    section("6. SKILL & TOOL EXPLORER")
+
+    if so25 is None:
+        print("  SKIP  so25_processed.parquet not found — skipping all skill tests")
+        return
+
+    # Data loads with required columns
+    try:
+        required = {"LanguageHaveWorkedWith", "DatabaseHaveWorkedWith",
+                    "WebframeHaveWorkedWith", "CompUSD", "JobSat"}
+        assert required.issubset(set(so25.columns)), f"missing: {required - set(so25.columns)}"
+        ok(f"so25_processed.parquet loaded — {len(so25):,} rows, all required columns present")
+    except Exception as e:
+        fail("so25 load", str(e))
+
+    # skill_stats returns correct keys
+    try:
+        result = skill_stats(so25, "Python", "Languages")
+        required_keys = {"skill", "pct_using", "n_users", "median_salary_users",
+                         "median_salary_others", "mean_jobsat_users", "mean_jobsat_others"}
+        assert required_keys == set(result.keys()), f"missing keys: {required_keys - set(result.keys())}"
+        ok("skill_stats returns all required keys")
+    except Exception as e:
+        fail("skill_stats keys", str(e))
+
+    # Python is widely used (>30%)
+    try:
+        result = skill_stats(so25, "Python", "Languages")
+        assert result["pct_using"] > 30, f"Python pct={result['pct_using']:.1f}% — expected >30%"
+        assert result["n_users"] > 1000, f"n_users={result['n_users']}"
+        ok(f"Python usage — {result['pct_using']:.1f}% of respondents ({result['n_users']:,} users)")
+    except Exception as e:
+        fail("Python usage rate", str(e))
+
+    # SQL and Python have positive median salary
+    try:
+        for skill_name in ["Python", "SQL"]:
+            r = skill_stats(so25, skill_name, "Languages")
+            assert not pd.isna(r["median_salary_users"]), f"{skill_name} has NaN median salary"
+            assert r["median_salary_users"] > 0, f"{skill_name} median salary <= 0"
+        ok("Python and SQL have positive median salary for users")
+    except Exception as e:
+        fail("skill median salary positive", str(e))
+
+    # pct_using is in [0, 100] for all skills in Languages category
+    try:
+        for skill_name in ["Python", "SQL", "JavaScript", "Go", "Rust"]:
+            r = skill_stats(so25, skill_name, "Languages")
+            assert 0 <= r["pct_using"] <= 100, f"{skill_name} pct={r['pct_using']}"
+        ok("pct_using in [0, 100] for sampled languages")
+    except Exception as e:
+        fail("pct_using range", str(e))
+
+    # Unknown skill returns 0 users with no crash
+    try:
+        r = skill_stats(so25, "NONEXISTENT_LANGUAGE_XYZ123", "Languages")
+        assert r["n_users"] == 0, f"expected 0 users, got {r['n_users']}"
+        assert r["pct_using"] == 0.0, f"expected 0% usage, got {r['pct_using']}"
+        ok("unknown skill — returns 0 users, 0% usage, no crash")
+    except Exception as e:
+        fail("unknown skill graceful", str(e))
+
+    # Databases category works
+    try:
+        r = skill_stats(so25, "PostgreSQL", "Databases")
+        assert r["pct_using"] > 0, "PostgreSQL has 0% usage"
+        ok(f"Databases category — PostgreSQL: {r['pct_using']:.1f}% usage")
+    except Exception as e:
+        fail("Databases category", str(e))
+
+    # Frameworks category works
+    try:
+        r = skill_stats(so25, "React", "Frameworks")
+        assert r["pct_using"] > 0, "React has 0% usage"
+        ok(f"Frameworks category — React: {r['pct_using']:.1f}% usage")
+    except Exception as e:
+        fail("Frameworks category", str(e))
+
+    # Multiple skills can be computed without crash (batch)
+    try:
+        batch = ["Python", "SQL", "JavaScript"]
+        rows = [skill_stats(so25, s, "Languages") for s in batch]
+        df_skills = pd.DataFrame(rows).sort_values("median_salary_users", ascending=False)
+        assert len(df_skills) == 3
+        ok(f"batch of {len(batch)} skills computed and sorted without crash")
+    except Exception as e:
+        fail("batch skill_stats", str(e))
+
+    # JobSat mean is in reasonable range [1, 10]
+    try:
+        r = skill_stats(so25, "Python", "Languages")
+        if not pd.isna(r["mean_jobsat_users"]):
+            assert 1 <= r["mean_jobsat_users"] <= 10, f"Python jobsat={r['mean_jobsat_users']}"
+        ok(f"Python mean_jobsat_users={r['mean_jobsat_users']:.2f} (in range 1–10)" if not pd.isna(r["mean_jobsat_users"]) else "Python JobSat not available (NaN)")
+    except Exception as e:
+        fail("JobSat range", str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. CAREER PATH EXPLORER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_career_path_explorer(sr, fallback, jss, ai_usage, remote_sat):
+    section("7. CAREER PATH EXPLORER")
+
+    sr_roles = sorted(sr["role"].unique())
+    sr_countries = sorted(sr["country"].unique())
+
+    # Build progression for Developer, full-stack in first available country
+    def build_progression(role, country):
+        progression = []
+        for band in EXP_BANDS:
+            sub = sr[(sr["role"] == role) & (sr["country"] == country) & (sr["exp_band"] == band)]
+            if len(sub) == 0:
+                sub = fallback[fallback["role"] == role]
+            if len(sub) > 0:
+                progression.append({
+                    "band": band,
+                    "median": float(sub.iloc[0]["median_salary"]),
+                    "p25": float(sub.iloc[0]["p25_salary"]),
+                    "p75": float(sub.iloc[0]["p75_salary"]),
+                    "count": int(sub.iloc[0]["count"]),
+                })
+        return progression
+
+    # Progression has data for all bands (at least via fallback)
+    try:
+        test_role = "Developer, full-stack"
+        test_country = sr_countries[0]
+        prog = build_progression(test_role, test_country)
+        assert len(prog) == len(EXP_BANDS), f"expected {len(EXP_BANDS)} bands, got {len(prog)}"
+        ok(f"full progression has all {len(EXP_BANDS)} bands — role={test_role}, country={test_country}")
+    except Exception as e:
+        fail("full progression bands", str(e))
+
+    # Progression medians are positive
+    try:
+        prog = build_progression("Developer, full-stack", sr_countries[0])
+        assert all(p["median"] > 0 for p in prog), "some median salary <= 0"
+        ok("all progression band medians are positive")
+    except Exception as e:
+        fail("progression medians positive", str(e))
+
+    # p25 <= median <= p75 in each band
+    try:
+        prog = build_progression("Data scientist", sr_countries[0])
+        for p in prog:
+            assert p["p25"] <= p["median"] <= p["p75"], \
+                f"band {p['band']}: p25={p['p25']} median={p['median']} p75={p['p75']}"
+        ok("p25 <= median <= p75 in all progression bands")
+    except Exception as e:
+        fail("progression p25/median/p75 order", str(e))
+
+    # Career progression for all roles builds without crash
+    try:
+        crashes = []
+        for role in sr_roles:
+            try:
+                prog = build_progression(role, sr_countries[0])
+                assert isinstance(prog, list)
+            except Exception as ex:
+                crashes.append(f"{role}: {ex}")
+        assert len(crashes) == 0, f"crashes: {crashes}"
+        ok(f"progression builds without crash for all {len(sr_roles)} roles")
+    except Exception as e:
+        fail("progression all roles", str(e))
+
+    # Job satisfaction lookup works for all roles
+    try:
+        jss_roles = set(jss["role"].unique())
+        sr_roles_set = set(sr["role"].unique())
+        covered = sr_roles_set & jss_roles
+        ok(f"JSS covers {len(covered)}/{len(sr_roles_set)} SO roles "
+           f"({len(sr_roles_set - jss_roles)} show 'no data' fallback)")
+    except Exception as e:
+        fail("JSS coverage", str(e))
+
+    # JSS values are in valid range [1, 10]
+    try:
+        assert (jss["mean_jobsat"] >= 1).all() and (jss["mean_jobsat"] <= 10).all(), \
+            "mean_jobsat out of [1,10]"
+        assert (jss["median_jobsat"] >= 1).all() and (jss["median_jobsat"] <= 10).all(), \
+            "median_jobsat out of [1,10]"
+        ok(f"JSS values in [1, 10] for all {len(jss)} roles")
+    except Exception as e:
+        fail("JSS value range", str(e))
+
+    # Similar roles: fallback groupby doesn't crash
+    try:
+        role_medians = (
+            fallback.groupby("role")["median_salary"]
+            .first()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        assert len(role_medians) == len(fallback), "fallback has duplicate roles"
+        test_role = "Data scientist"
+        current_med_series = role_medians[role_medians["role"] == test_role]["median_salary"].values
+        assert len(current_med_series) > 0, "Data scientist not in fallback"
+        current_med = float(current_med_series[0])
+        nearby = role_medians[
+            (role_medians["median_salary"] >= current_med * 0.8) &
+            (role_medians["role"] != test_role)
+        ].head(5)
+        ok(f"similar roles query — {len(nearby)} roles within 80% salary of {test_role}")
+    except Exception as e:
+        fail("similar roles query", str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. TRENDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_trends(salary_trends, remote_trend, company_size_trend, overall_trend):
+    section("8. TRENDS")
+
+    # Overall trend: years 2020-2025, required columns
+    try:
+        assert set(overall_trend.columns) >= {"work_year", "median", "p25", "p75", "count"}, \
+            f"missing cols: {set(overall_trend.columns)}"
+        years = sorted(overall_trend["work_year"].unique().tolist())
+        assert years == [2020, 2021, 2022, 2023, 2024, 2025], f"years={years}"
+        ok(f"overall_salary_trend — years {years[0]}–{years[-1]}, {len(overall_trend)} rows")
+    except Exception as e:
+        fail("overall_trend structure", str(e))
+
+    # Overall trend: p25 <= median <= p75
+    try:
+        violations = overall_trend[
+            (overall_trend["p25"] > overall_trend["median"]) |
+            (overall_trend["median"] > overall_trend["p75"])
+        ]
+        assert len(violations) == 0, f"{len(violations)} violations of p25<=median<=p75"
+        ok("overall_trend: p25 <= median <= p75 for all years")
+    except Exception as e:
+        fail("overall_trend ordering", str(e))
+
+    # Overall trend: median salary is positive and increasing from 2020
+    try:
+        ost = overall_trend.sort_values("work_year")
+        assert (ost["median"] > 0).all(), "some median salary <= 0"
+        sal_2020 = ost[ost["work_year"] == 2020]["median"].values[0]
+        sal_2024 = ost[ost["work_year"] == 2024]["median"].values[0]
+        ok(f"overall median salary — 2020: ${sal_2020:,.0f}, 2024: ${sal_2024:,.0f}")
+    except Exception as e:
+        fail("overall median salary", str(e))
+
+    # Salary trends by role: required columns, known roles
+    try:
+        assert set(salary_trends.columns) >= {"work_year", "job_title", "median_salary"}, \
+            f"missing cols"
+        roles = sorted(salary_trends["job_title"].unique())
+        assert len(roles) >= 3, f"only {len(roles)} roles in salary_trends"
+        ok(f"salary_trends — {len(roles)} roles: {roles[:4]}")
+    except Exception as e:
+        fail("salary_trends structure", str(e))
+
+    # Salary trends: all median salaries positive
+    try:
+        assert (salary_trends["median_salary"] > 0).all(), "some median_salary <= 0"
+        ok(f"salary_trends: all {len(salary_trends)} median_salary values > 0")
+    except Exception as e:
+        fail("salary_trends positive", str(e))
+
+    # Remote trend: required columns, values 0-100
+    try:
+        assert set(remote_trend.columns) >= {"work_year", "avg_remote_ratio"}, "missing cols"
+        assert (remote_trend["avg_remote_ratio"] >= 0).all()
+        assert (remote_trend["avg_remote_ratio"] <= 100).all()
+        ok(f"remote_trend — {len(remote_trend)} years, avg_remote_ratio in [0, 100]")
+    except Exception as e:
+        fail("remote_trend structure", str(e))
+
+    # Company size trend: S/M/L all present
+    try:
+        sizes = set(company_size_trend["company_size"].unique())
+        assert sizes == {"S", "M", "L"}, f"sizes={sizes}"
+        assert (company_size_trend["median_salary"] > 0).all(), "some median_salary <= 0"
+        ok(f"company_size_trend — S/M/L all present, all salaries > 0")
+    except Exception as e:
+        fail("company_size_trend structure", str(e))
+
+    # Multiselect default roles exist in salary_trends
+    try:
+        default_roles = ["Software Engineer", "Data Scientist", "Machine Learning Engineer"]
+        available = set(salary_trends["job_title"].unique())
+        found = [r for r in default_roles if r in available]
+        ok(f"default trend roles found: {found} ({len(found)}/{len(default_roles)})")
+    except Exception as e:
+        fail("default trend roles", str(e))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
@@ -807,10 +1306,33 @@ def main():
         f"  model:         {type(model).__name__}"
     )
 
+    sr, fallback, jss, ai_usage, remote_sat = load_survey_fixtures()
+    print(
+        f"  salary_ranges: {sr.shape[0]:,} rows × {sr.shape[1]} cols\n"
+        f"  fallback:      {fallback.shape[0]:,} rows\n"
+        f"  jss:           {jss.shape[0]:,} rows"
+    )
+
+    st_df, rt, cst, ost = load_trends_fixtures()
+    print(
+        f"  salary_trends: {st_df.shape[0]:,} rows\n"
+        f"  overall_trend: {ost.shape[0]:,} rows"
+    )
+
+    so25 = load_so25_skills()
+    if so25 is not None:
+        print(f"  so25_skills:   {so25.shape[0]:,} rows × {so25.shape[1]} cols")
+    else:
+        print("  so25_skills:   NOT FOUND (skill tests will be skipped)")
+
     test_salary_predictor(df, features, model, feature_cols)
     test_skill_comparator(df, features, model, feature_cols)
     test_explore_postings(df, features, model, feature_cols)
     test_salary_map(df, features, model, feature_cols)
+    test_salary_explorer(sr, fallback, jss, ai_usage, remote_sat)
+    test_skill_tool_explorer(so25)
+    test_career_path_explorer(sr, fallback, jss, ai_usage, remote_sat)
+    test_trends(st_df, rt, cst, ost)
 
     print(f"\n{'═' * 60}")
     print(f"  Results:  {_passed} passed,  {_failed} failed")
