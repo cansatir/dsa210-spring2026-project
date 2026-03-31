@@ -74,65 +74,8 @@ TOP_10_SKILLS = [
     "sas",
 ]
 
-# Exact feature columns the model was trained on (56 total)
-ALL_FEATURES = [
-    "job_title_short_Business Analyst",
-    "job_title_short_Cloud Engineer",
-    "job_title_short_Data Analyst",
-    "job_title_short_Data Engineer",
-    "job_title_short_Data Scientist",
-    "job_title_short_Machine Learning Engineer",
-    "job_title_short_Senior Data Analyst",
-    "job_title_short_Senior Data Engineer",
-    "job_title_short_Senior Data Scientist",
-    "job_title_short_Software Engineer",
-    "job_country_grp_Australia",
-    "job_country_grp_Canada",
-    "job_country_grp_Colombia",
-    "job_country_grp_France",
-    "job_country_grp_Germany",
-    "job_country_grp_Greece",
-    "job_country_grp_India",
-    "job_country_grp_Israel",
-    "job_country_grp_Mexico",
-    "job_country_grp_Netherlands",
-    "job_country_grp_Other",
-    "job_country_grp_Philippines",
-    "job_country_grp_Poland",
-    "job_country_grp_Portugal",
-    "job_country_grp_Singapore",
-    "job_country_grp_South Africa",
-    "job_country_grp_South Korea",
-    "job_country_grp_Sudan",
-    "job_country_grp_Spain",
-    "job_country_grp_United Kingdom",
-    "job_country_grp_United States",
-    "seniority_Junior",
-    "seniority_Mid",
-    "seniority_Senior",
-    "job_work_from_home",
-    "job_no_degree_mention",
-    "skill_sql",
-    "skill_python",
-    "skill_r",
-    "skill_tableau",
-    "skill_excel",
-    "skill_power bi",
-    "skill_aws",
-    "skill_azure",
-    "skill_spark",
-    "skill_java",
-    "skill_snowflake",
-    "skill_hadoop",
-    "skill_nosql",
-    "skill_scala",
-    "skill_databricks",
-    "skill_kafka",
-    "skill_redshift",
-    "skill_oracle",
-    "skill_sas",
-    "skill_airflow",
-]
+# Feature columns are loaded at runtime from features.parquet to guarantee
+# exact name and order match with the trained model (see load_feature_cols).
 
 FEATURE_LABELS = {
     "job_title_short_Business Analyst": "Job title: Business Analyst",
@@ -173,10 +116,17 @@ def load_model():
     return joblib.load(MODEL_PATH)
 
 
+@st.cache_data
+def load_feature_cols():
+    """Load exact feature column names in training order from features.parquet."""
+    cols = pd.read_parquet(DATA_DIR / "features.parquet").columns.tolist()
+    return [c for c in cols if c != "salary_year_avg"]
+
+
 # ── Helper functions ──────────────────────────────────────────────────────────
-def make_feature_vector(job_title, country, seniority, remote, skills_selected):
-    """Build a single-row DataFrame matching the model's training feature set."""
-    vec = {col: 0 for col in ALL_FEATURES}
+def make_feature_vector(job_title, country, seniority, remote, skills_selected, feature_cols):
+    """Build a single-row DataFrame with columns in exact training order."""
+    vec = {col: 0 for col in feature_cols}
     title_col = f"job_title_short_{job_title}"
     if title_col in vec:
         vec[title_col] = 1
@@ -191,12 +141,12 @@ def make_feature_vector(job_title, country, seniority, remote, skills_selected):
         skill_col = f"skill_{skill}"
         if skill_col in vec:
             vec[skill_col] = 1
-    return pd.DataFrame([vec])
+    return pd.DataFrame([vec], columns=feature_cols)
 
 
-def top_drivers(feature_vec, model, n=3):
+def top_drivers(feature_vec, model, feature_cols, n=3):
     """Return the top-n most influential features for this prediction in plain English."""
-    importances = dict(zip(ALL_FEATURES, model.feature_importances_))
+    importances = dict(zip(feature_cols, model.feature_importances_))
     active = [
         (feat, importances.get(feat, 0))
         for feat, val in feature_vec.iloc[0].items()
@@ -232,6 +182,7 @@ page = st.sidebar.radio("Go to", PAGES, label_visibility="collapsed")
 # Load data once
 df, features = load_data()
 model = load_model()
+feature_cols = load_feature_cols()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -267,7 +218,13 @@ if page == PAGES[0]:
 
     st.markdown("")
     if st.button("🔮 Predict My Salary", type="primary", use_container_width=False):
-        feat_vec = make_feature_vector(job_title, country, seniority, remote, selected_skills)
+        feat_vec = make_feature_vector(job_title, country, seniority, remote, selected_skills, feature_cols)
+        if int(feat_vec.values.sum()) == 0:
+            st.warning(
+                "No recognizable features were set. "
+                "Please select a job title, country, and seniority level before predicting."
+            )
+            st.stop()
         prediction = float(model.predict(feat_vec)[0])
         low = max(0.0, prediction - RMSE)
         high = prediction + RMSE
@@ -288,7 +245,7 @@ if page == PAGES[0]:
         st.write(
             "Here are the three factors that most influenced this prediction:"
         )
-        drivers = top_drivers(feat_vec, model, n=3)
+        drivers = top_drivers(feat_vec, model, feature_cols, n=3)
         if drivers:
             for i, label in enumerate(drivers, 1):
                 st.write(f"**{i}.** {label}")
@@ -576,8 +533,9 @@ elif page == PAGES[3]:
 
             diff = row["median_salary"] - overall_med
             direction = "above" if diff >= 0 else "below"
+            role_label = "all roles" if sel_title_map == "All Roles" else f"{sel_title_map.lower()} roles"
             st.info(
                 f"**{selected_country}** has a median salary of **${row['median_salary']:,.0f}**, "
                 f"which is **${abs(diff):,.0f} {direction}** the overall median "
-                f"of **${overall_med:,.0f}** for {sel_title_map.lower()} roles."
+                f"of **${overall_med:,.0f}** for {role_label}."
             )
