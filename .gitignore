@@ -2,6 +2,16 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+!data/processed/salary_ranges.parquet
+!data/processed/salary_ranges_by_role.parquet
+!data/processed/job_satisfaction_summary.parquet
+!data/processed/ai_usage_satisfaction.parquet
+!data/processed/aiben_summary.parquet
+!data/processed/remote_satisfaction.parquet
+!data/processed/salary_trends.parquet
+!data/processed/remote_trend.parquet
+!data/processed/company_size_trend.parquet
+!data/processed/overall_salary_trend.parquet
 **/.DS_Store
 __pycache__/
 *.pyc
