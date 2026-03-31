@@ -51,9 +51,11 @@ dsa210-spring2026-project/
 
 ---
 
-## Reproducing the Results
+## How to Run
 
-**Requirements:** Docker (no other dependencies needed)
+### Option 1 — Docker (recommended, zero setup)
+
+Requires only Docker installed.
 
 ```bash
 git clone https://github.com/cansatir/dsa210-spring2026-project
@@ -61,13 +63,17 @@ cd dsa210-spring2026-project
 make build
 ```
 
-`make build` starts Jupyter at **http://localhost:8888**.
-Open `notebooks/analysis.ipynb` and run all cells top-to-bottom.
-The notebook downloads data, runs all analysis, and writes figures and results automatically.
+Open http://localhost:8888
 
-To stop the container:
+### Option 2 — Local Python
+
+Requires Python 3.11+.
+
 ```bash
-make stop
+git clone https://github.com/cansatir/dsa210-spring2026-project
+cd dsa210-spring2026-project
+pip install -r requirements.txt
+jupyter notebook notebooks/analysis.ipynb
 ```
 
 ---
